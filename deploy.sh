@@ -8,7 +8,8 @@
 #   1. copies kuma-<name>-push.py to /usr/local/bin/              (mode 700)
 #   2. copies the example config to /etc/kuma-<name>-push.json    (mode 600)
 #      only if there is no config yet. An existing config is never touched
-#      and nothing else is written to /etc for it.
+#      and nothing else is written to /etc for it; deploy.sh only REPORTS
+#      new options, obsolete keys and type mismatches (read-only).
 #   3. writes /etc/cron.d/kuma-<name>-push (runs every minute), but only once
 #      the config holds a real push URL (no KUMA-IP / TOKEN placeholder).
 #   4. with --keyring only: creates the read-only Ceph user client.kuma
@@ -59,6 +60,55 @@ run() {
 write_file() {
     info "write $1: $2"
     [ "$DRY" -eq 1 ] || printf '%s\n' "$2" > "$1"
+}
+
+# report_config <config> <example> <script>: read-only comparison of an existing
+# config with the repo's example and the script's DEFAULTS. Prints findings only.
+report_config() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import importlib.util, json, sys
+conf_path, example_path, script_path = sys.argv[1:4]
+try:
+    with open(conf_path) as f:
+        conf = json.load(f)
+except (OSError, ValueError) as e:
+    print(f"!!  {conf_path}: not readable as JSON ({e})")
+    sys.exit(0)
+with open(example_path) as f:
+    example = json.load(f)
+spec = importlib.util.spec_from_file_location("monitor", script_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)          # defines constants and functions only, runs nothing
+defaults = mod.DEFAULTS
+
+def kind(v):
+    if isinstance(v, bool):
+        return "bool"
+    if isinstance(v, (int, float)):
+        return "number"
+    return {"str": "string", "list": "list", "dict": "object"}.get(type(v).__name__, type(v).__name__)
+
+found = 0
+def walk(c, e, d, prefix=""):
+    global found
+    for k in e:
+        if k not in c:
+            found += 1
+            print(f"    new option {prefix}{k} (default applies, example value: {json.dumps(e[k])})")
+    for k, v in c.items():
+        if k not in d:
+            found += 1
+            print(f"!!  {prefix}{k}: unknown to the script (obsolete or misspelled), it is ignored")
+        elif kind(v) != kind(d[k]):
+            found += 1
+            print(f"!!  {prefix}{k}: is a {kind(v)}, the script expects a {kind(d[k])} - please fix")
+        elif isinstance(v, dict) and d[k]:    # an empty default dict is a free-form map (e.g. node_names)
+            walk(v, e.get(k) if isinstance(e.get(k), dict) else {}, d[k], f"{prefix}{k}.")
+
+walk(conf, example, defaults)
+if not found:
+    print("    config matches the current options")
+PY
 }
 
 # config_ready <config>: true if the push URL is set and not a placeholder
@@ -123,7 +173,8 @@ install_component() {
 
     # 2. config: never overwrite
     if [ -e "$conf" ]; then
-        info "config $conf exists - left unchanged (new options: compare with $SRC/$name.json)"
+        info "config $conf exists - left unchanged, checking it against the current options:"
+        report_config "$conf" "$SRC/$name.json" "$SRC/$name.py"
     else
         run install -D -m 600 "$SRC/$name.json" "$conf"
     fi

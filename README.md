@@ -57,8 +57,10 @@ Then, per node:
    (`mesh_peers`, `mesh_ifaces`, `node_names` for Ceph).
 3. Run `./deploy.sh --apply` again. It now enables cron and does a test run.
 
-To update later: `git pull && ./deploy.sh && ./deploy.sh --apply`. Configs and state are kept;
-compare your config with the example in the repo (`kuma-*-push.json`) for added options.
+To update later: `git pull && ./deploy.sh && ./deploy.sh --apply`. Configs and state are kept.
+For an existing config, `deploy.sh` reports new options (their defaults
+apply until you add them), keys the script no longer knows, and values of
+the wrong type. It never changes the config; edit it by hand.
 
 ## Usage
 
