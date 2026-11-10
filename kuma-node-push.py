@@ -426,8 +426,15 @@ def check_disks(ctx):
 
 
 def check_smart(ctx, path, hint, d):
-    cfg, key = ctx.cfg, f"smart/{path}"
+    # State is keyed by serial number, not path: a replacement drive at the same
+    # path (possibly already worn) gets its own fresh baseline.
+    ident = d.get("serial_number") or path
+    cfg, key = ctx.cfg, f"smart/{ident}"
     model = d.get("model_name", "")
+    seen = ctx.state.setdefault("smart_seen", {})
+    if path in seen and seen[path] != ident:
+        ctx.add("Disks", OK, f"{path}: drive changed ({seen[path]} -> {ident}), new baseline")
+    seen[path] = ident
     if d.get("smart_status", {}).get("passed") is False:
         ctx.add("Disks", BAD, f"{path}: SMART overall health FAILED", hint)
     temp = d.get("temperature", {}).get("current")
@@ -452,7 +459,7 @@ def check_smart(ctx, path, hint, d):
             if lvl:
                 ctx.add("Disks", lvl, f"{path}: wear {pu}% used", hint)
             info.append(f"{pu}% worn")
-            info.append(wear_projection(ctx, path, hint, pu))
+            info.append(wear_projection(ctx, ident, path, hint, pu))
         for field, lvl, label in (("media_errors", BAD, "media/data integrity errors"),
                                   ("warning_temp_time", WARN, "minutes above warning temp"),
                                   ("critical_comp_time", BAD, "minutes above critical temp")):
@@ -491,7 +498,7 @@ def check_smart(ctx, path, hint, d):
                 if lvl:
                     ctx.add("Disks", lvl, f"{path}: wear {pu}% used", hint)
                 info.append(f"{pu}% worn")
-                info.append(wear_projection(ctx, path, hint, pu))
+                info.append(wear_projection(ctx, ident, path, hint, pu))
 
     gd = d.get("scsi_grown_defect_list")
     if gd is not None:
@@ -556,12 +563,16 @@ def check_smartd(ctx):
         ctx.add("Disks", OK, "smartd running, self-tests scheduled")
 
 
-def wear_projection(ctx, path, hint, pu):
+def wear_projection(ctx, ident, path, hint, pu):
     """Project days until 100% wear from the observed increase. Returns a short info text."""
     w = ctx.state.setdefault("wear", {})
-    e = w.get(path)
+    for k in [k for k, v in w.items() if ctx.now - v.get("seen", v["ts"]) > 30 * 86400]:
+        del w[k]                                      # drives gone for 30 days
+    e = w.get(ident)
     if not e or pu < e["pu"]:
-        w[path] = {"ts": ctx.now, "pu": pu}
+        w[ident] = e = {"ts": ctx.now, "pu": pu}
+    e["seen"] = ctx.now
+    if e["ts"] == ctx.now:
         return "wear trend pending"
     days = (ctx.now - e["ts"]) / 86400
     if pu == e["pu"] or days < 7:
