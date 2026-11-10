@@ -3,7 +3,7 @@
 
 Run every minute via cron on each Ceph node. Pushes status=up when all checks
 pass, otherwise status=down with a short list of problems. The 'ping' value
-carries pool usage in %, so Kuma graphs it.
+carries the max mesh RTT in ms by default (configurable via ping_metric).
 
 Needs only a read-only Ceph keyring (client.kuma) and outbound HTTP to Kuma.
 No inbound ports, no credentials stored in Kuma.
@@ -29,6 +29,7 @@ DEFAULTS = {
     "mesh_ifaces": [],            # mesh NICs on this node
     "nic_speed": 10000,           # expected link speed in Mb/s (0 = don't check)
     "nic_err_delta": 10,          # new NIC errors per run that trigger an alert
+    "ping_metric": "rtt",         # graphed value in Kuma: "rtt" (max mesh RTT, ms), "pool" (%), "none"
 }
 NIC_COUNTERS = ["rx_errors", "rx_crc_errors", "rx_frame_errors", "rx_missed_errors", "tx_errors"]
 BAD_PG_STATES = {"laggy", "degraded", "undersized", "stale", "peering", "down",
@@ -88,6 +89,7 @@ def check_pool(cfg, problems):
 
 
 def check_mesh(cfg, problems):
+    worst = None
     for peer in cfg["mesh_peers"]:
         r = subprocess.run(["ping", "-q", "-n", "-c", "5", "-i", "0.2", "-W", "1", peer],
                            capture_output=True, text=True)
@@ -95,8 +97,12 @@ def check_mesh(cfg, problems):
         rtt = re.search(r"= [\d.]+/([\d.]+)/", r.stdout)
         if not loss or float(loss.group(1)) > 0:
             problems.append(f"{peer} loss {loss.group(1) if loss else '100'}%")
-        elif rtt and float(rtt.group(1)) > cfg["mesh_rtt_ms"]:
-            problems.append(f"{peer} rtt {rtt.group(1)}ms")
+        elif rtt:
+            v = float(rtt.group(1))
+            worst = v if worst is None else max(worst, v)
+            if v > cfg["mesh_rtt_ms"]:
+                problems.append(f"{peer} rtt {v}ms")
+    return worst
 
 
 def read(path):
@@ -144,8 +150,12 @@ def check_nics(cfg, problems):
 def main():
     dry = "--dry-run" in sys.argv
     cfg = load_conf()
-    problems, pct = [], None
-    for fn in (check_status, check_osd_perf, check_mesh, check_nics):
+    problems, pct, rtt = [], None, None
+    try:
+        rtt = check_mesh(cfg, problems)
+    except Exception as e:
+        problems.append(f"check_mesh: {e}"[:120])
+    for fn in (check_status, check_osd_perf, check_nics):
         try:
             fn(cfg, problems)
         except Exception as e:
@@ -158,8 +168,9 @@ def main():
     status = "down" if problems else "up"
     msg = "; ".join(problems) if problems else "OK" + (f", {cfg['pool']} {pct:.1f}%" if pct is not None else "")
     params = {"status": status, "msg": msg[:250]}
-    if pct is not None:
-        params["ping"] = round(pct, 1)
+    value = {"rtt": rtt, "pool": pct}.get(cfg["ping_metric"])
+    if value is not None:
+        params["ping"] = round(value, 3 if cfg["ping_metric"] == "rtt" else 1)
     url = cfg["push_url"].split("?")[0] + "?" + urllib.parse.urlencode(params)
 
     if dry:
