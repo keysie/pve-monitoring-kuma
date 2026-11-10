@@ -1,13 +1,13 @@
 {
   "push_url": "http://KUMA-IP:3001/api/push/TOKEN",
-  "pool": "ceph-vm",
-  "pool_pct": [75, 85],
-  "osd_commit_ms": [20, 100],
   "mesh_peers": ["192.168.33.7", "192.168.33.8"],
-  "mesh_rtt_ms": [0.5, 2.0],
   "mesh_ifaces": ["ens802f0", "ens802f1"],
   "nic_speed": 10000,
+  "rtt_ms": [0.5, 2.0],
+  "retrans_pct": [0.05, 1.0],
+  "retrans_min_mb": 10,
   "nic_err_delta": [5, 100],
-  "ignore_checks": [],
+  "osd_ms": [20, 100],
+  "osd_outlier": 4,
   "attn_is_down": false
 }
