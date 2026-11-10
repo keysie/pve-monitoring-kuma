@@ -131,9 +131,13 @@ SEL_SKIP = re.compile(r"log area reset|cleared", re.I)
 
 # ---------------------------------------------------------------- helpers
 
+# cron runs with PATH=/usr/bin:/bin; smartctl, zpool, zfs live in /usr/sbin
+SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
 def run(cmd, timeout=30):
     """Run a command with C locale. Returns (rc, stdout, stderr); rc 127 = not installed."""
-    env = dict(os.environ, LC_ALL="C", LANG="C")
+    env = dict(os.environ, LC_ALL="C", LANG="C", PATH=SAFE_PATH)
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
         return r.returncode, r.stdout, r.stderr
@@ -271,7 +275,7 @@ def parse_num(s):
 def check_zfs(ctx):
     rc, out, err = run(["zpool", "status", "-p"])
     if rc == 127:
-        ctx.add("ZFS", OK, "zpool not installed")
+        ctx.add("ZFS", WARN, "zpool not found, ZFS checks are blind (disable the area if unused)", "zpool")
         return
     if "no pools available" in out + err:
         ctx.add("ZFS", OK, "no pools")
