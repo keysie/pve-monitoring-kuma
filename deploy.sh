@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # deploy.sh - install the Uptime Kuma push monitors on a Proxmox VE host.
 #
-# What it does, and nothing else:
+# By default it only SHOWS what it would do. Nothing is changed unless you
+# add --apply.
+#
+# What it does with --apply, and nothing else:
 #   1. copies kuma-<name>-push.py to /usr/local/bin/              (mode 700)
 #   2. copies the example config to /etc/kuma-<name>-push.json    (mode 600)
 #      only if there is no config yet. An existing config is never touched;
@@ -11,19 +14,20 @@
 #   4. with --keyring only: creates the read-only Ceph user client.kuma
 #      (mon 'allow r', mgr 'allow r') in /etc/pve/priv/ if it does not exist.
 #
-# Usage:  ./deploy.sh [--ceph] [--node] [--keyring] [--dry-run]
+# Usage:  ./deploy.sh [--apply] [--ceph] [--node] [--keyring]
+#   (no --apply)      only print what would be done (default)
+#   --apply           actually do it
 #   --ceph / --node   install only that monitor (default: both)
 #   --keyring         also create the Ceph keyring for client.kuma
-#   --dry-run         only print what would be done
 #
-# Re-run it after editing the config (to enable cron) or after a git pull
-# (to update the scripts). Your configs and state are kept.
+# Re-run it with --apply after editing the config (to enable cron) or after
+# a git pull (to update the scripts). Your configs and state are kept.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${ROOT:-}"                # install prefix, for testing only (ROOT=/tmp/x ./deploy.sh)
 KEYRING_FILE="$ROOT/etc/pve/priv/ceph.client.kuma.keyring"
-DRY=0
+DRY=1                           # default: show only; --apply sets 0
 KEYRING=0
 COMPONENTS=()
 
@@ -32,7 +36,7 @@ for arg in "$@"; do
         --ceph)    COMPONENTS+=(ceph) ;;
         --node)    COMPONENTS+=(node) ;;
         --keyring) KEYRING=1 ;;
-        --dry-run) DRY=1 ;;
+        --apply)   DRY=0 ;;
         -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
         *)         echo "unknown option: $arg (see --help)" >&2; exit 2 ;;
     esac
@@ -45,13 +49,13 @@ say()  { echo "==> $*"; }
 info() { echo "    $*"; }
 warn() { echo "!!  $*"; }
 
-# run <command...>: print the command (shell-quoted, copy-pasteable), execute it unless --dry-run
+# run <command...>: print the command (shell-quoted, copy-pasteable), execute it only with --apply
 run() {
     info "$(printf '%q ' "$@")"
     [ "$DRY" -eq 1 ] || "$@"
 }
 
-# write_file <path> <line>: print, write unless --dry-run
+# write_file <path> <line>: print, write only with --apply
 write_file() {
     info "write $1: $2"
     [ "$DRY" -eq 1 ] || printf '%s\n' "$2" > "$1"
@@ -75,11 +79,11 @@ need_tools() {
 # ------------------------------------------------------------------ preflight
 
 if [ "$DRY" -eq 0 ] && [ -z "$ROOT" ] && [ "$(id -u)" -ne 0 ]; then
-    echo "please run as root (or with --dry-run)" >&2
+    echo "--apply needs root (without --apply nothing is changed)" >&2
     exit 1
 fi
 command -v python3 >/dev/null 2>&1 || { echo "python3 is required" >&2; exit 1; }
-[ "$DRY" -eq 1 ] && say "dry run - nothing is changed"
+[ "$DRY" -eq 1 ] && say "DRY RUN - showing what would be done, nothing is changed (add --apply to do it)"
 
 # ------------------------------------------------------------------ per component
 
@@ -103,7 +107,7 @@ install_component() {
             if [ "$KEYRING" -eq 1 ]; then
                 run ceph auth get-or-create client.kuma mon 'allow r' mgr 'allow r' -o "$KEYRING_FILE"
             else
-                warn "no keyring for client.kuma - run again with --keyring, or create it by hand:"
+                warn "no keyring for client.kuma - add --keyring, or create it by hand:"
                 info "ceph auth get-or-create client.kuma mon 'allow r' mgr 'allow r' -o $KEYRING_FILE"
             fi
         fi
@@ -134,7 +138,7 @@ install_component() {
             "$bin" --dry-run | sed 's/^/      /' || warn "test run failed, see output above"
         fi
     else
-        warn "cron NOT enabled: edit /etc/$name.json (push_url etc.), then run ./deploy.sh again"
+        warn "cron NOT enabled: edit /etc/$name.json (push_url etc.), then run ./deploy.sh --apply again"
     fi
 }
 
@@ -142,4 +146,8 @@ for comp in "${COMPONENTS[@]}"; do
     install_component "$comp"
 done
 
-say "done"
+if [ "$DRY" -eq 1 ]; then
+    say "DRY RUN finished - nothing was changed. Run again with --apply to do the above."
+else
+    say "done"
+fi

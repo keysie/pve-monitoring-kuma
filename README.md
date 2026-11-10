@@ -38,11 +38,12 @@ On each node, as root:
 ```bash
 git clone https://github.com/keysie/pve-monitoring-kuma.git
 cd pve-monitoring-kuma
-./deploy.sh --dry-run          # shows exactly what would be done
-./deploy.sh --keyring          # --keyring: create the read-only Ceph user client.kuma (once per cluster)
+./deploy.sh                    # dry run: shows exactly what would be done, changes nothing
+./deploy.sh --apply --keyring  # do it; --keyring creates the read-only Ceph user client.kuma (once per cluster)
 ```
 
-`deploy.sh` copies the scripts to `/usr/local/bin`, the example configs to
+`deploy.sh` only shows its plan unless you add `--apply`. With `--apply` it
+copies the scripts to `/usr/local/bin`, the example configs to
 `/etc/kuma-*-push.json` (only if none exist) and enables cron once the
 config holds a real push URL. It is plain bash and short; read it before
 running it.
@@ -54,9 +55,9 @@ Then, per node:
 2. Edit `/etc/kuma-ceph-push.json` and `/etc/kuma-node-push.json`: set
    `push_url` (with that node's token) and the node-specific values
    (`mesh_peers`, `mesh_ifaces`, `node_names` for Ceph).
-3. Run `./deploy.sh` again. It now enables cron and does a test run.
+3. Run `./deploy.sh --apply` again. It now enables cron and does a test run.
 
-To update later: `git pull && ./deploy.sh`. Configs and state are kept;
+To update later: `git pull && ./deploy.sh && ./deploy.sh --apply`. Configs and state are kept;
 compare your config with the new `*.json.example` for added options.
 
 ## Usage
