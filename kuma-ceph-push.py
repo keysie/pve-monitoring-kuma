@@ -245,8 +245,8 @@ def build_msg(issues):
 
     # Prefer showing all areas; if hints don't fit, list only problem areas
     # (with hints) plus "rest: Good"; as a last resort drop the hints.
-    attempts = [(AREAS, False), (["Links", "OSD-Latency"], False), (["Links"], False),
-                (AREAS, True), (["Links", "OSD-Latency"], True), (["Links"], True), ([], False)]
+    attempts = [(AREAS, False), (AREAS, True), (["Links", "OSD-Latency"], True),
+                (["Links"], True), ([], False)]
     for with_hints, only_problems in attempts:
         msg = render(with_hints, only_problems)
         if len(msg) <= MAXLEN:
