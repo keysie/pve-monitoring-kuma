@@ -1,0 +1,19 @@
+{
+  "push_url": "http://KUMA-IP:3001/api/push/TOKEN",
+  "areas": {"ECC": true, "ZFS": true, "Disks": true, "HW": true, "System": true},
+  "hold_minutes": 60,
+  "warn_is_down": false,
+  "ignore": [],
+  "ecc_ce_delta": [1, 10],
+  "zfs_err_delta": [1, 10],
+  "zfs_scrub_max_days": 35,
+  "smart_interval_min": 10,
+  "nvme_wear_pct": [80, 95],
+  "ata_crc_delta": [1, 50],
+  "ipmi_interval_min": 5,
+  "aer_cor_delta": [1, 100],
+  "throttle_delta": [1, 1000],
+  "sel_full_pct": 80,
+  "time_offset_ms": [10, 50],
+  "klog_ignore_ifaces": "^(tap|fwpr|fwln|fwbr|veth)"
+}
