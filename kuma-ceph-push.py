@@ -231,15 +231,24 @@ def build_msg(issues):
         if lvl and hint and hint not in hints[area]:
             hints[area].append(hint)
 
-    def render(with_hints):
-        parts = []
+    def render(with_hints, only_problems=False):
+        parts, good = [], 0
         for a in AREAS:
+            if only_problems and not level[a]:
+                good += 1
+                continue
             h = hints[a] if a in with_hints and level[a] else []
             parts.append(f"{a}: {WORD[level[a]]}" + (f" ({','.join(h)})" if h else ""))
+        if good:
+            parts.append(f"rest: {WORD[OK]}")
         return ", ".join(parts)
 
-    for with_hints in (AREAS, ["Links", "OSD-Latency"], ["Links"], []):
-        msg = render(with_hints)
+    # Prefer showing all areas; if hints don't fit, list only problem areas
+    # (with hints) plus "rest: Good"; as a last resort drop the hints.
+    attempts = [(AREAS, False), (["Links", "OSD-Latency"], False), (["Links"], False),
+                (AREAS, True), (["Links", "OSD-Latency"], True), (["Links"], True), ([], False)]
+    for with_hints, only_problems in attempts:
+        msg = render(with_hints, only_problems)
         if len(msg) <= MAXLEN:
             return msg
     return msg[:MAXLEN]
