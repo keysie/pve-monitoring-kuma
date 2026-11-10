@@ -16,13 +16,16 @@ Areas:
   ZFS     pool/vdev state, read/write/checksum counters, data errors,
           scrub age/result, new zpool events (slow I/O, checksum, deadman ...)
   Disks   SMART/NVMe deltas: media errors, spare, wear, realloc/pending,
-          CRC (cable), temperature time, self-test; plus kernel I/O errors
-          (polled every smart_interval_min, cached in between)
+          CRC (cable), temperature time; long self-test result and age,
+          smartd running with a test schedule; wear projection (time left);
+          daily write volume of the OS pool disks; plus kernel I/O errors
+          (SMART polled every smart_interval_min, cached in between)
   HW      PCIe AER counters, PCIe link downtraining vs. baseline, CPU thermal
           throttling, machine checks, IPMI sensors, SEL events and SEL fill level
           (IPMI polled every ipmi_interval_min)
   System  kernel log: hung tasks, lockups, RCU stalls, OOM kills, NIC link
-          drops; chrony offset / sync state
+          drops; chrony offset / sync state; expected settings still in
+          place (sysfs values, file contents, ZFS properties, see "expect")
 
 Problems found from counters or the log are held for hold_minutes, so a single
 event stays visible (and a Bad stays down) long enough to be noticed.
@@ -38,6 +41,8 @@ CONF = "/etc/kuma-node-push.json"
 STATE = "/var/lib/kuma-node-push/state.json"
 LOCK = "/run/kuma-node-push.lock"
 SYS = "/sys"
+PROC = "/proc"
+SMARTD_CONF = "/etc/smartd.conf"
 OK, WARN, BAD = 0, 1, 2
 WORD = ["Good", "Warn", "Bad"]
 ALL_AREAS = ["ECC", "ZFS", "Disks", "HW", "System"]
@@ -59,6 +64,10 @@ DEFAULTS = {
     "smart_interval_min": 10,
     "nvme_wear_pct": [80, 95],      # wear in % used, NVMe and SATA devstat [Warn, Bad]
     "ata_crc_delta": [1, 50],       # new UDMA CRC errors (cable/backplane)
+    "selftest_max_days": 35,        # last long self-test older than this = Warn (0 = off)
+    "wear_days_left": [365, 90],    # projected days until 100% wear [Warn, Bad]
+    "write_pools": ["rpool"],       # pools whose member disks get a write-volume check
+    "write_gb_day": [30, 60],       # written GB per disk per day (rolling 24h) [Warn, Bad]
     # HW
     "ipmi_interval_min": 5,
     "aer_cor_delta": [1, 100],      # new corrected PCIe errors per device per run
@@ -67,6 +76,11 @@ DEFAULTS = {
     # System
     "time_offset_ms": [10, 50],     # chrony system offset (Ceph allows 50 ms)
     "klog_ignore_ifaces": "^(tap|fwpr|fwln|fwbr|veth)",
+    # settings that must stay in place, e.g.
+    #  {"name": "txg_timeout", "sysfs": "/sys/module/zfs/parameters/zfs_txg_timeout", "value": "30"}
+    #  {"name": "txg persist", "file": "/etc/modprobe.d/zfs.conf", "contains": "zfs_txg_timeout=30"}
+    #  {"name": "rpool atime", "zfs": "rpool", "property": "atime", "value": "off"}
+    "expect": [],
 }
 
 # kernel log patterns: (regex, area, level, label, hint group index or fixed hint)
@@ -268,6 +282,8 @@ def check_zfs(ctx):
         if not pm:
             continue
         pool = pm.group(1)
+        members = ctx.state.setdefault("pool_disks", {})
+        members[pool] = []
         st = re.search(r"^\s*state: (\S+)", block, re.M)
         state = st.group(1) if st else "?"
         if state != "ONLINE":
@@ -324,6 +340,8 @@ def check_zfs(ctx):
             vname, vstate = t[0], t[1]
             disk = dev_name(vname)
             hint = disk
+            if disk not in members[pool]:
+                members[pool].append(disk)
             if vstate not in ("ONLINE", "AVAIL", "INUSE"):
                 ctx.add("ZFS", BAD, f"{pool}: {vname} is {vstate}", hint)
             r, w, c = nums
@@ -380,6 +398,7 @@ def check_disks(ctx):
         raise RuntimeError(f"smartctl --scan-open failed: {err.strip()[:100]}")
     if not devices:
         ctx.add("Disks", OK, "no SMART devices found")
+    check_smartd(ctx)
     for dv in devices:
         path, dtype = dv.get("name", ""), dv.get("type", "auto")
         hint = dtype if path.startswith("/dev/bus") else os.path.basename(path)
@@ -426,6 +445,7 @@ def check_smart(ctx, path, hint, d):
             if lvl:
                 ctx.add("Disks", lvl, f"{path}: wear {pu}% used", hint)
             info.append(f"{pu}% worn")
+            info.append(wear_projection(ctx, path, hint, pu))
         for field, lvl, label in (("media_errors", BAD, "media/data integrity errors"),
                                   ("warning_temp_time", WARN, "minutes above warning temp"),
                                   ("critical_comp_time", BAD, "minutes above critical temp")):
@@ -464,6 +484,7 @@ def check_smart(ctx, path, hint, d):
                 if lvl:
                     ctx.add("Disks", lvl, f"{path}: wear {pu}% used", hint)
                 info.append(f"{pu}% worn")
+                info.append(wear_projection(ctx, path, hint, pu))
 
     gd = d.get("scsi_grown_defect_list")
     if gd is not None:
@@ -472,12 +493,110 @@ def check_smart(ctx, path, hint, d):
             ctx.add("Disks", WARN, f"{path}: +{dv} grown defects ({gd} total)", hint,
                     hold=f"{key}/grown_defects")
 
-    tests = d.get("ata_smart_self_test_log", {}).get("standard", {}).get("table", [])
-    if tests and tests[0].get("status", {}).get("passed") is False:
-        ctx.add("Disks", WARN, f"{path}: last self-test failed "
-                f"({tests[0].get('status', {}).get('string', '')})", hint)
+    check_selftest(ctx, path, hint, d)
 
     ctx.add("Disks", OK, f"{path}: " + ", ".join(x for x in info if x))
+
+
+def check_selftest(ctx, path, hint, d):
+    """Result and age of the last long (extended) self-test."""
+    poh = d.get("power_on_time", {}).get("hours")
+    tests = []                                    # (type, passed, status text, hours)
+    for t in d.get("ata_smart_self_test_log", {}).get("standard", {}).get("table", []):
+        tests.append((t.get("type", {}).get("string", ""), t.get("status", {}).get("passed"),
+                      t.get("status", {}).get("string", ""), t.get("lifetime_hours")))
+    nv = d.get("nvme_self_test_log")
+    for t in (nv or {}).get("table", []):
+        res = t.get("self_test_result", {})
+        tests.append((t.get("self_test_code", {}).get("string", ""), res.get("value") == 0,
+                      res.get("string", ""), t.get("power_on_hours")))
+    has_log = "ata_smart_self_test_log" in d or nv is not None
+    if tests and tests[0][1] is False:
+        ctx.add("Disks", WARN, f"{path}: last self-test failed ({tests[0][2]})", hint)
+    running = "in progress" in json.dumps(d.get("ata_smart_data", {}).get("self_test", {})).lower() or \
+        (nv or {}).get("current_self_test_operation", {}).get("value", 0) not in (0, None)
+    max_days = ctx.cfg["selftest_max_days"]
+    if running:
+        ctx.add("Disks", OK, f"{path}: self-test in progress")
+        return
+    if not max_days or not has_log:
+        return
+    longs = [t for t in tests if re.search(r"extended|long", t[0], re.I)]
+    if not longs:
+        ctx.add("Disks", WARN, f"{path}: no long self-test logged", f"{hint} test")
+        return
+    if poh is not None and longs[0][3] is not None:
+        age = (poh - longs[0][3]) / 24
+        if age > max_days:
+            ctx.add("Disks", WARN, f"{path}: last long self-test {age:.0f} days ago", f"{hint} test")
+        else:
+            ctx.add("Disks", OK, f"{path}: last long self-test {age:.0f} days ago: {longs[0][2]}")
+
+
+def check_smartd(ctx):
+    """smartd must run and schedule self-tests (-s), otherwise tests silently stop."""
+    active = any(run(["systemctl", "is-active", "--quiet", u])[0] == 0
+                 for u in ("smartd", "smartmontools"))
+    if not active:
+        ctx.add("Disks", WARN, "smartd is not running", "smartd")
+        return
+    conf = readf(SMARTD_CONF) or ""
+    lines = [l for l in conf.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    if ctx.cfg["selftest_max_days"] and not any(re.search(r"\s-s\s", f" {l} ") for l in lines):
+        ctx.add("Disks", WARN, "smartd runs, but schedules no self-tests (-s) in /etc/smartd.conf",
+                "smartd")
+    else:
+        ctx.add("Disks", OK, "smartd running, self-tests scheduled")
+
+
+def wear_projection(ctx, path, hint, pu):
+    """Project days until 100% wear from the observed increase. Returns a short info text."""
+    w = ctx.state.setdefault("wear", {})
+    e = w.get(path)
+    if not e or pu < e["pu"]:
+        w[path] = {"ts": ctx.now, "pu": pu}
+        return "wear trend pending"
+    days = (ctx.now - e["ts"]) / 86400
+    if pu == e["pu"] or days < 7:
+        return f"no wear increase in {days:.0f} days" if days >= 7 else "wear trend pending"
+    per_day = (pu - e["pu"]) / days
+    left = (100 - pu) / per_day
+    lvl = BAD if left < ctx.cfg["wear_days_left"][1] else WARN if left < ctx.cfg["wear_days_left"][0] else OK
+    if lvl:
+        ctx.add("Disks", lvl, f"{path}: at the current rate 100% wear in ~{left:.0f} days "
+                f"(+{per_day * 30:.1f}%/month)", f"{hint} wear")
+    return f"+{per_day * 30:.1f}%/month, ~{left / 30:.0f} months left"
+
+
+def check_writes(ctx):
+    """Written GB per day (rolling 24h) for the member disks of the watched pools."""
+    disks = sorted({d for p in ctx.cfg["write_pools"] for d in ctx.state.get("pool_disks", {}).get(p, [])})
+    if not disks:
+        return
+    try:
+        with open(f"{PROC}/diskstats") as f:
+            stats = {l.split()[2]: int(l.split()[9]) for l in f if len(l.split()) > 9}
+    except OSError:
+        return
+    hist = ctx.state.setdefault("writes", {})
+    for disk in disks:
+        if disk not in stats:
+            continue
+        h = hist.setdefault(disk, [])
+        if h and stats[disk] < h[-1][1]:
+            h.clear()                                 # counter reset (reboot)
+        if not h or ctx.now - h[-1][0] >= 600:
+            h.append([ctx.now, stats[disk]])
+        while len(h) > 2 and ctx.now - h[1][0] >= 86400:
+            h.pop(0)                                  # keep ~24h of samples
+        span = ctx.now - h[0][0]
+        if span < 3600:
+            ctx.add("Disks", OK, f"{disk}: write rate pending ({span / 60:.0f} of 60 min)")
+            continue
+        gb_day = (stats[disk] - h[0][1]) * 512 / span * 86400 / 1e9
+        lvl = grade(gb_day, ctx.cfg["write_gb_day"])
+        ctx.add("Disks", lvl, f"{disk}: {gb_day:.1f} GB/day written (last {span / 3600:.0f}h)",
+                f"{disk} writes" if lvl else "")
 
 
 # ---------------------------------------------------------------- HW
@@ -665,13 +784,37 @@ def check_time(ctx):
         ctx.add("System", WARN, "time sync state unknown", "time")
 
 
+def check_expect(ctx):
+    """Settings that must stay in place (survive reboots, updates, reinstalls)."""
+    for e in ctx.cfg["expect"]:
+        name = e.get("name", "setting")
+        if "sysfs" in e:
+            path = e["sysfs"].replace("/sys/", f"{SYS}/", 1)
+            cur = readf(path)
+            ok = cur == str(e["value"])
+            what = f"{e['sysfs']} = {cur} (expected {e['value']})"
+        elif "file" in e:
+            cur = readf(e["file"])
+            ok = cur is not None and e["contains"] in cur
+            what = f"{e['file']} {'contains' if ok else 'lacks'} '{e['contains']}'"
+        elif "zfs" in e:
+            rc, out, _ = run(["zfs", "get", "-H", "-o", "value", e["property"], e["zfs"]])
+            cur = out.strip()
+            ok = rc == 0 and cur == str(e["value"])
+            what = f"{e['zfs']} {e['property']} = {cur or '?'} (expected {e['value']})"
+        else:
+            continue
+        ctx.add("System", OK if ok else WARN, f"{name}: {what}", "" if ok else name)
+
+
 # ---------------------------------------------------------------- core
 
 CHECKS = [("ECC", check_ecc, None), ("ZFS", check_zfs, None),
-          ("Disks", check_disks, "smart_interval_min"),
+          ("Disks", check_disks, "smart_interval_min"), ("Disks", check_writes, None),
           ("HW", check_pcie, None), ("HW", check_throttle, None),
           ("HW", check_ipmi, "ipmi_interval_min"),
-          ("System", check_klog, None), ("System", check_time, None)]
+          ("System", check_klog, None), ("System", check_time, None),
+          ("System", check_expect, None)]
 
 
 def run_checks(cfg, state, now, fresh=False):
