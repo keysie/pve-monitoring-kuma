@@ -157,8 +157,13 @@ def dev_name(name):
         if os.path.exists(cand):
             name = os.path.basename(os.path.realpath(cand))
             break
+    name = re.sub(r"-part\d+$", "", name)
     m = re.match(r"(nvme\d+n\d+)p\d+$|((?:sd|vd|hd|xvd)[a-z]+)\d+$", name)
-    return (m.group(1) or m.group(2)) if m else name
+    if m:
+        return m.group(1) or m.group(2)
+    if len(name) > HINTLEN and "_" in name:          # unresolved by-id name: use the serial
+        return name.rsplit("_", 1)[-1][-HINTLEN:]
+    return name
 
 
 class Ctx:
@@ -307,7 +312,7 @@ def check_zfs(ctx):
                 continue
             vname, vstate = t[0], t[1]
             disk = dev_name(vname)
-            hint = f"{pool}/{disk}"
+            hint = disk
             if vstate not in ("ONLINE", "AVAIL", "INUSE"):
                 ctx.add("ZFS", BAD, f"{pool}: {vname} is {vstate}", hint)
             r, w, c = nums
@@ -704,28 +709,28 @@ def build_msg(issues, areas):
         if i["lvl"] == level[a] and i["lvl"] and i["hint"] and i["hint"] not in hints[a]:
             hints[a].append(i["hint"])
 
-    def render(with_hints, only_problems):
+    def render(hinted, only_problems, first_only=False):
         parts, good = [], 0
         for a in areas:
             if only_problems and not level[a]:
                 good += 1
                 continue
-            h = hints[a] if with_hints and level[a] else []
+            h = (hints[a][:1] if first_only else hints[a]) if a in hinted else []
             parts.append(f"{a}: {WORD[level[a]]}" + (f" ({','.join(h)})" if h else ""))
         if good:
             parts.append(f"rest: {WORD[OK]}")
         return ", ".join(parts)
 
-    # all areas; else only problem areas with hints + "rest: Good"; else no hints
-    for with_hints, only_problems in ((True, False), (True, True), (False, False)):
-        msg = render(with_hints, only_problems)
+    # hint priority: Bad areas first, then in area order
+    problem = sorted([a for a in areas if level[a]], key=lambda a: (-level[a], areas.index(a)))
+    attempts = [(problem, False), (problem, True)]
+    attempts += [(problem[:n], True, True) for n in range(len(problem), 0, -1)]
+    attempts += [([], True), ([], False)]
+    for att in attempts:
+        msg = render(*att)
         if len(msg) <= MAXLEN:
             return msg
-    # still too long: trim hints to the first one per area
-    for a in areas:
-        hints[a] = hints[a][:1]
-    msg = render(True, True)
-    return msg if len(msg) <= MAXLEN else render(False, False)[:MAXLEN]
+    return msg[:MAXLEN]
 
 
 def kuma_rtt(url):
