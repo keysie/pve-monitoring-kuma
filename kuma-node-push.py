@@ -79,9 +79,9 @@ KLOG_RULES = [
     (r"rcu: INFO: rcu_\w+ (?:self-)?detected stall|rcu_\w+ self-detected stall",
      "System", BAD, "RCU stall", "RCU stall"),
     (r"Out of memory: Killed process|oom-kill:", "System", WARN, "OOM kill", "OOM"),
-    (r"(nvme\d+)n?\d*:? .*(?:timeout|controller is down|resetting controller|Device not ready)",
-     "Disks", BAD, "NVMe timeout/reset", 1),
-    (r"I/O error, dev (\w+)", "Disks", WARN, "I/O error", 1),
+    (r"(nvme\d+): (?:I/O \d+ (?:\(\w+\) )?QID \d+ timeout|controller is down|"
+     r"resetting controller|Device not ready|Abort status)", "Disks", BAD, "NVMe timeout/reset", 1),
+    (r"I/O error, dev (?!sr\d|loop)(\w+)", "Disks", WARN, "I/O error", 1),
     (r"(ata\d+)(?:\.\d+)?: (?:hard resetting link|SError|failed command|exception Emask)",
      "Disks", WARN, "SATA link error", 1),
     (r"([\w.-]+): (?:NIC )?Link is Down", "System", WARN, "NIC link down", 1),
