@@ -33,7 +33,7 @@ for arg in "$@"; do
         --node)    COMPONENTS+=(node) ;;
         --keyring) KEYRING=1 ;;
         --dry-run) DRY=1 ;;
-        -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
         *)         echo "unknown option: $arg (see --help)" >&2; exit 2 ;;
     esac
 done
