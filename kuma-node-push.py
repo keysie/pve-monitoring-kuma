@@ -298,6 +298,17 @@ def check_zfs(ctx):
                     ctx.add("ZFS", WARN, f"{pool}: last scrub {age:.0f} days ago", f"{pool} scrub")
                 else:
                     ctx.add("ZFS", OK, f"{pool}: last scrub {when}, {errs} errors")
+        elif scan.startswith("resilvered"):
+            # a resilver replaces the scrub line, so judge the scrub age by its date
+            m = re.search(r" on (.+)$", scan)
+            try:
+                age = (ctx.now - time.mktime(time.strptime(m.group(1).strip(), "%a %b %d %H:%M:%S %Y"))) / 86400
+            except (AttributeError, ValueError):
+                age = None
+            if age is not None and age > ctx.cfg["zfs_scrub_max_days"]:
+                ctx.add("ZFS", WARN, f"{pool}: no scrub since resilver {age:.0f} days ago", f"{pool} scrub")
+            else:
+                ctx.add("ZFS", OK, f"{pool}: {scan}")
         else:
             ctx.add("ZFS", OK, f"{pool}: {scan}")
 
