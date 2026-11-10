@@ -19,7 +19,6 @@
   "ipmi_interval_min": 5,
   "aer_cor_delta": [1, 100],
   "throttle_delta": [1, 1000],
-  "sel_full_pct": 80,
   "time_offset_ms": [10, 50],
   "klog_ignore_ifaces": "^(tap|fwpr|fwln|fwbr|veth)",
   "selftest_max_days": 35,

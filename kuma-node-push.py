@@ -72,7 +72,6 @@ DEFAULTS = {
     "ipmi_interval_min": 5,
     "aer_cor_delta": [1, 100],      # new corrected PCIe errors per device per run
     "throttle_delta": [1, 1000],    # new CPU thermal throttle events per run
-    "sel_full_pct": 80,
     # System
     "time_offset_ms": [10, 50],     # chrony system offset (Ceph allows 50 ms)
     "klog_ignore_ifaces": "^(tap|fwpr|fwln|fwbr|veth)",
@@ -691,11 +690,11 @@ def check_ipmi(ctx):
 
     rc, out, err = run(["ipmitool", "sel", "info"], timeout=30)
     if rc == 0:
+        # SEL fill level is informational only (shown in --dry-run, never a Warn)
         m = re.search(r"Percent Used\s*:\s*(\d+)%", out)
-        if m and int(m.group(1)) >= ctx.cfg["sel_full_pct"]:
-            ctx.add("HW", WARN, f"SEL {m.group(1)}% full, new events may be lost", "SEL full")
-        if re.search(r"Overflow\s*:\s*true", out):
-            ctx.add("HW", WARN, "SEL overflow, events were lost", "SEL full")
+        if m:
+            ctx.add("HW", OK, f"SEL {m.group(1)}% full"
+                    + (", overflow (oldest events dropped)" if re.search(r"Overflow\s*:\s*true", out) else ""))
 
     rc, out, err = run(["ipmitool", "sel", "elist", "last", "100"], timeout=45)
     if rc:
