@@ -107,8 +107,10 @@ def check_status(cfg):
         states.update(p["state_name"].split("+"))
     bad, attn = sorted(states & PG_BAD), sorted(states & PG_ATTN)
     pl = BAD if bad else ATTN if attn else OK
-    ptok = "PG:" + (",".join(bad + attn) or "ok")
-    return [(hl, htok, hshort), (pl, ptok, ptok)]
+    names = bad + attn
+    ptok = "PG:" + (",".join(names) or "ok")
+    pshort = f"PG:{names[0]}+{len(names) - 1}" if len(names) > 1 else ptok
+    return [(hl, htok, hshort), (pl, ptok, pshort)]
 
 
 def check_osd(cfg):
