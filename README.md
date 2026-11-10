@@ -58,7 +58,7 @@ Then, per node:
 3. Run `./deploy.sh --apply` again. It now enables cron and does a test run.
 
 To update later: `git pull && ./deploy.sh && ./deploy.sh --apply`. Configs and state are kept;
-compare your config with the new `*.json.example` for added options.
+compare your config with the example in the repo (`kuma-*-push.json`) for added options.
 
 ## Usage
 

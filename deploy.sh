@@ -7,8 +7,8 @@
 # What it does with --apply, and nothing else:
 #   1. copies kuma-<name>-push.py to /usr/local/bin/              (mode 700)
 #   2. copies the example config to /etc/kuma-<name>-push.json    (mode 600)
-#      only if there is no config yet. An existing config is never touched;
-#      the current example is put next to it as *.json.example instead.
+#      only if there is no config yet. An existing config is never touched
+#      and nothing else is written to /etc for it.
 #   3. writes /etc/cron.d/kuma-<name>-push (runs every minute), but only once
 #      the config holds a real push URL (no KUMA-IP / TOKEN placeholder).
 #   4. with --keyring only: creates the read-only Ceph user client.kuma
@@ -123,8 +123,7 @@ install_component() {
 
     # 2. config: never overwrite
     if [ -e "$conf" ]; then
-        info "config $conf exists - left unchanged"
-        run install -m 600 "$SRC/$name.json" "$conf.example"
+        info "config $conf exists - left unchanged (new options: compare with $SRC/$name.json)"
     else
         run install -D -m 600 "$SRC/$name.json" "$conf"
     fi
