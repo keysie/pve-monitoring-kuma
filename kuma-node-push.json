@@ -17,6 +17,8 @@
   "nvme_wear_pct": [80, 95],
   "ata_crc_delta": [1, 50],
   "ipmi_interval_min": 5,
+  "sel_autoclear_pct": 90,
+  "sel_archive_keep": 20,
   "aer_cor_delta": [1, 100],
   "throttle_delta": [1, 1000],
   "time_offset_ms": [10, 50],

@@ -22,7 +22,8 @@ Areas:
           (SMART polled every smart_interval_min, cached in between)
   HW      PCIe AER counters, PCIe link downtraining vs. baseline, CPU thermal
           throttling, machine checks, IPMI sensors, SEL events and SEL fill level
-          (IPMI polled every ipmi_interval_min)
+          (IPMI polled every ipmi_interval_min; the SEL is archived to
+          /var/lib/kuma-node-push/sel-archive and cleared when it fills up)
   System  kernel log: hung tasks, lockups, RCU stalls, OOM kills, NIC link
           drops; chrony offset / sync state; expected settings still in
           place (sysfs values, file contents, ZFS properties, see "expect")
@@ -39,6 +40,7 @@ import urllib.error, urllib.parse, urllib.request
 
 CONF = "/etc/kuma-node-push.json"
 STATE = "/var/lib/kuma-node-push/state.json"
+SEL_ARCHIVE = "/var/lib/kuma-node-push/sel-archive"
 LOCK = "/run/kuma-node-push.lock"
 SYS = "/sys"
 PROC = "/proc"
@@ -70,6 +72,8 @@ DEFAULTS = {
     "write_gb_day": [30, 60],       # written GB per disk per day (rolling 24h) [Warn, Bad]
     # HW
     "ipmi_interval_min": 5,
+    "sel_autoclear_pct": 90,        # archive + clear the SEL at this fill level (0 = off)
+    "sel_archive_keep": 20,         # number of SEL archive files to keep
     "aer_cor_delta": [1, 100],      # new corrected PCIe errors per device per run
     "throttle_delta": [1, 1000],    # new CPU thermal throttle events per run
     # System
@@ -688,10 +692,12 @@ def check_ipmi(ctx):
         if lvl:
             ctx.add("HW", lvl, f"IPMI sensor {name}: {reading} [{status}]", name)
 
+    sel_pct = None
     rc, out, err = run(["ipmitool", "sel", "info"], timeout=30)
     if rc == 0:
         # SEL fill level is informational only (shown in --dry-run, never a Warn)
         m = re.search(r"Percent Used\s*:\s*(\d+)%", out)
+        sel_pct = int(m.group(1)) if m else None
         if m:
             ctx.add("HW", OK, f"SEL {m.group(1)}% full"
                     + (", overflow (oldest events dropped)" if re.search(r"Overflow\s*:\s*true", out) else ""))
@@ -724,6 +730,38 @@ def check_ipmi(ctx):
             ctx.add("HW", lvl, f"SEL #{eid}: {text}", sensor, hold=f"sel/{sensor}")
     ctx.state["sel_last_id"] = top if entries else (last or 0)
     ctx.add("HW", OK, f"IPMI: {n} sensors read, SEL last id {top}")
+
+    limit = ctx.cfg["sel_autoclear_pct"]
+    if limit and sel_pct is not None and sel_pct >= limit:
+        sel_archive_and_clear(ctx, sel_pct)
+
+
+def sel_archive_and_clear(ctx, pct):
+    """Save the full SEL to a file, then clear it. Never in dry runs, never without archive."""
+    if ctx.fresh:
+        ctx.add("HW", OK, f"SEL {pct}% full: would be archived and cleared (not in dry run)")
+        return
+    rc, out, err = run(["ipmitool", "sel", "elist"], timeout=180)
+    if rc or not out.strip():
+        rc, out, err = run(["ipmitool", "sel", "list"], timeout=120)   # faster, without names
+    if rc or not out.strip():
+        ctx.add("HW", WARN, f"SEL {pct}% full, archiving failed, not cleared: {err.strip()[:60]}",
+                "SEL archive")
+        return
+    os.makedirs(SEL_ARCHIVE, exist_ok=True)
+    path = os.path.join(SEL_ARCHIVE, time.strftime("sel-%Y%m%d-%H%M%S.txt", time.localtime(ctx.now)))
+    with open(path, "w") as f:
+        f.write(out)
+    old = sorted(glob.glob(os.path.join(SEL_ARCHIVE, "sel-*.txt")))
+    for f in old[:max(0, len(old) - ctx.cfg["sel_archive_keep"])]:
+        os.remove(f)
+    rc, _, err = run(["ipmitool", "sel", "clear"], timeout=60)
+    if rc:
+        ctx.add("HW", WARN, f"SEL archived to {path}, but clear failed: {err.strip()[:60]}", "SEL clear")
+        return
+    ctx.state["sel_last_id"] = 0          # report every new entry after the clear
+    ctx.add("HW", OK, f"SEL was {pct}% full: archived to {path} "
+            f"({len(out.splitlines())} entries) and cleared")
 
 
 # ---------------------------------------------------------------- System
