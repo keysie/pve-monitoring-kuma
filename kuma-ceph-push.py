@@ -7,7 +7,7 @@ One push monitor per node, cron once a minute. Each run sends:
   status  up for OK/ATTN, down for BAD (see attn_is_down)
   msg     one line, max 60 chars, one verdict (Good/Warn/Bad) per area, e.g.
             Links: Good, NICs: Good, OSD-Latency: Good, Ceph: Good
-            Links: Bad (.8), NICs: Warn, OSD-Latency: Good, Ceph: Warn
+            Links: Bad (01->03), NICs: Warn, OSD-Latency: Good, Ceph: Warn
           Details (values, reasons) are printed by --dry-run.
   ping    RTT from this node to the Kuma host in ms
 
@@ -39,6 +39,7 @@ DEFAULTS = {
     "keyring": "",                # explicit keyring path; empty = ceph.conf default
     "host": "",                   # CRUSH host name; empty = short hostname
     "mesh_peers": [],             # mesh IPs of the other nodes
+    "node_names": {},             # mesh IP -> short name for link hints, e.g. {"192.168.33.6": "01"}
     "mesh_ifaces": [],            # mesh NICs on this node
     "nic_speed": 10000,           # expected link speed in Mb/s (0 = don't check)
     "rtt_ms": [0.5, 2.0],         # mesh ping RTT, thresholds [ATTN, BAD]; any loss = BAD
@@ -141,9 +142,20 @@ def check_ceph(cfg, issues):
                    f"slowest local osd.{worst} {ms}ms (cluster median {med}ms)"))
 
 
+def local_name(cfg):
+    """Short name of this node: the node_names entry whose IP is configured locally."""
+    r = subprocess.run(["ip", "-o", "addr", "show"], capture_output=True, text=True)
+    local_ips = set(re.findall(r"inet6? ([0-9a-fA-F:.]+)/", r.stdout))
+    for ip, name in cfg["node_names"].items():
+        if ip in local_ips:
+            return name
+    return socket.gethostname().split(".")[0]
+
+
 def check_mesh(cfg, issues, prev, state):
+    me = local_name(cfg)
     for peer in cfg["mesh_peers"]:
-        tag = "." + peer.rsplit(".", 1)[-1]
+        tag = f"{me}->{cfg['node_names'].get(peer, peer)}"
         loss, rtt = ping_avg(peer)
         if loss > 0 or rtt is None:
             issues.append(("Links", BAD, tag, f"{peer}: ping loss {loss:.0f}%"))
