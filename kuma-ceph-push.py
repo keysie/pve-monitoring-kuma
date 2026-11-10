@@ -5,9 +5,10 @@ links (loss, latency, TCP retransmits, NIC errors, link speed) and slow local OS
 
 One push monitor per node, cron once a minute. Each run sends:
   status  up for OK/ATTN, down for BAD (see attn_is_down)
-  msg     one line, max 60 chars, e.g.
-            OK - ping .7 0.07 .8 0.06ms, retr 0.01%, OSD 3ms
-            BAD - to .8: 2.31% retrans, ens802f1 +34 errors
+  msg     one line, max 60 chars, one verdict (Good/Warn/Bad) per area, e.g.
+            Links: Good, NICs: Good, OSD-Latency: Good, Ceph: Good
+            Links: Bad (.8), NICs: Warn, OSD-Latency: Good, Ceph: Warn
+          Details (values, reasons) are printed by --dry-run.
   ping    RTT from this node to the Kuma host in ms
 
 Checks:
@@ -28,7 +29,8 @@ import urllib.error, urllib.parse, urllib.request
 CONF = "/etc/kuma-ceph-push.json"
 STATE = "/var/lib/kuma-ceph-push/state.json"
 OK, ATTN, BAD = 0, 1, 2
-LEVEL = ["OK", "ATTN", "BAD"]
+WORD = ["Good", "Warn", "Bad"]
+AREAS = ["Links", "NICs", "OSD-Latency", "Ceph"]
 MAXLEN = 60
 
 DEFAULTS = {
@@ -108,18 +110,18 @@ def tcp_counters(peer):
     return sent, retr
 
 
-def check_ceph(cfg, issues, summary):
+def check_ceph(cfg, issues):
     s = ceph(cfg, "status")
     if "SLOW_OPS" in s.get("health", {}).get("checks", {}):
-        issues.append((ATTN, "slow ops"))
+        issues.append(("Ceph", ATTN, "", "slow ops"))
     states = set()
     for p in s.get("pgmap", {}).get("pgs_by_state", []):
         states.update(p["state_name"].split("+"))
     for st in ("down", "stale", "incomplete"):
         if st in states:
-            issues.append((BAD, f"PGs {st}"))
+            issues.append(("Ceph", BAD, "", f"PGs {st}"))
     if "laggy" in states:
-        issues.append((ATTN, "laggy PGs"))
+        issues.append(("Ceph", ATTN, "", "laggy PGs"))
 
     d = ceph(cfg, "osd", "perf")
     infos = d.get("osdstats", d).get("osd_perf_infos", [])
@@ -127,7 +129,7 @@ def check_ceph(cfg, issues, summary):
     host = cfg["host"] or socket.gethostname().split(".")[0]
     local = [i for i in ceph(cfg, "osd", "ls-tree", host) if i in lat]
     if not local:
-        issues.append((ATTN, f"no OSDs found for {host}"))
+        issues.append(("OSD-Latency", ATTN, "", f"no OSDs found for host {host}"))
         return
     med = statistics.median(lat.values())
     worst = max(local, key=lat.get)
@@ -135,23 +137,19 @@ def check_ceph(cfg, issues, summary):
     lvl = grade(ms, cfg["osd_ms"])
     if lvl == OK and ms >= 5 and ms >= cfg["osd_outlier"] * max(med, 1):
         lvl = ATTN
-    if lvl:
-        issues.append((lvl, f"osd.{worst} slow {ms}ms"))
-    summary.append(f"OSD {ms}ms")
+    issues.append(("OSD-Latency", lvl, f"osd.{worst}" if lvl else "",
+                   f"slowest local osd.{worst} {ms}ms (cluster median {med}ms)"))
 
 
-def check_mesh(cfg, issues, summary, prev, state):
-    pings, retr_max = [], None
+def check_mesh(cfg, issues, prev, state):
     for peer in cfg["mesh_peers"]:
         tag = "." + peer.rsplit(".", 1)[-1]
         loss, rtt = ping_avg(peer)
         if loss > 0 or rtt is None:
-            issues.append((BAD, f"to {tag}: loss {loss:.0f}%"))
+            issues.append(("Links", BAD, tag, f"{peer}: ping loss {loss:.0f}%"))
         else:
-            pings.append(f"{tag} {rtt:.2f}")
             lvl = grade(rtt, cfg["rtt_ms"])
-            if lvl:
-                issues.append((lvl, f"to {tag}: {rtt:.2f}ms"))
+            issues.append(("Links", lvl, tag if lvl else "", f"{peer}: ping {rtt:.3f}ms"))
 
         sent, retr = tcp_counters(peer)
         state[f"tcp/{peer}"] = [sent, retr]
@@ -160,24 +158,21 @@ def check_mesh(cfg, issues, summary, prev, state):
             ds, dr = sent - old[0], retr - old[1]
             if ds >= cfg["retrans_min_mb"] * 1e6 and dr >= 0:
                 pct = 100 * dr / ds
-                retr_max = pct if retr_max is None else max(retr_max, pct)
                 lvl = grade(pct, cfg["retrans_pct"])
-                if lvl:
-                    issues.append((lvl, f"to {tag}: {pct:.2f}% retrans"))
-    if pings:
-        summary.append("ping " + " ".join(pings) + "ms")
-    if retr_max is not None:
-        summary.append(f"retr {retr_max:.2f}%")
+                issues.append(("Links", lvl, tag if lvl else "",
+                               f"{peer}: {pct:.3f}% TCP retrans ({ds / 1e6:.0f} MB sent)"))
+            else:
+                issues.append(("Links", OK, "", f"{peer}: retrans not judged (too little traffic)"))
 
 
 def check_nics(cfg, issues, prev, state):
     for ifc in cfg["mesh_ifaces"]:
         base = f"/sys/class/net/{ifc}"
         if not os.path.isdir(base):
-            issues.append((BAD, f"{ifc} missing"))
+            issues.append(("NICs", BAD, ifc, f"{ifc} missing"))
             continue
         if read(f"{base}/operstate") != "up":
-            issues.append((BAD, f"{ifc} down"))
+            issues.append(("NICs", BAD, ifc, f"{ifc} down"))
             continue
         if cfg["nic_speed"]:
             try:
@@ -185,7 +180,7 @@ def check_nics(cfg, issues, prev, state):
             except (OSError, ValueError):
                 speed = -1
             if speed != cfg["nic_speed"]:
-                issues.append((BAD, f"{ifc} at {speed}Mb/s"))
+                issues.append(("NICs", BAD, ifc, f"{ifc} at {speed}Mb/s"))
         new = 0
         for c in NIC_COUNTERS:
             try:
@@ -196,8 +191,7 @@ def check_nics(cfg, issues, prev, state):
             state[key] = v
             new += max(0, v - prev.get(key, v))
         lvl = grade(new, cfg["nic_err_delta"]) if new else OK
-        if lvl:
-            issues.append((lvl, f"{ifc} +{new} errors"))
+        issues.append(("NICs", lvl, ifc if lvl else "", f"{ifc}: {new} new errors"))
 
 
 def kuma_rtt(url):
@@ -216,45 +210,48 @@ def kuma_rtt(url):
     return (time.monotonic() - t) * 1000
 
 
-def build_msg(level, issues, summary):
-    if not issues:
-        msg = "OK - " + ", ".join(summary)
-    else:
-        items = [t for _, t in sorted(issues, key=lambda x: -x[0])]
-        msg, used = f"{LEVEL[level]} -", 0
-        for i, text in enumerate(items):
-            rest = len(items) - i - 1
-            cand = msg + ("," if used else "") + " " + text
-            if len(cand) + (len(f" +{rest} more") if rest else 0) > MAXLEN:
-                break
-            msg, used = cand, used + 1
-        if used == 0:
-            msg += " " + items[0]
-            used = 1
-        if used < len(items):
-            msg += f" +{len(items) - used} more"
-    return msg if len(msg) <= MAXLEN else msg[:MAXLEN - 1] + "~"
+def build_msg(issues):
+    """One verdict per area, with a short hint (which peer/NIC/OSD) when space allows."""
+    level = {a: OK for a in AREAS}
+    hints = {a: [] for a in AREAS}
+    for area, lvl, hint, _ in issues:
+        level[area] = max(level[area], lvl)
+        if lvl and hint and hint not in hints[area]:
+            hints[area].append(hint)
+
+    def render(with_hints):
+        parts = []
+        for a in AREAS:
+            h = hints[a] if a in with_hints and level[a] else []
+            parts.append(f"{a}: {WORD[level[a]]}" + (f" ({','.join(h)})" if h else ""))
+        return ", ".join(parts)
+
+    for with_hints in (AREAS, ["Links", "OSD-Latency"], ["Links"], []):
+        msg = render(with_hints)
+        if len(msg) <= MAXLEN:
+            return msg
+    return msg[:MAXLEN]
 
 
 def main():
     dry = "--dry-run" in sys.argv
     cfg = load_conf()
     prev, state = load_state(), {}
-    issues, summary, errors = [], [], []
+    issues, errors = [], []
 
-    for fn, args in ((check_mesh, (prev, state)), (check_nics, (prev, state)), (check_ceph, ())):
+    for fn, area, args in ((check_mesh, "Links", (prev, state)), (check_nics, "NICs", (prev, state)),
+                           (check_ceph, "Ceph", ())):
         try:
-            if fn is check_nics:
-                fn(cfg, issues, *args)
-            else:
-                fn(cfg, issues, summary, *args)
+            fn(cfg, issues, *args)
         except Exception as e:
-            issues.append((BAD, "ceph not reachable" if fn is check_ceph else f"{fn.__name__} failed"))
+            issues.append((area, BAD, "", f"{fn.__name__} failed"))
+            if fn is check_ceph:
+                issues.append(("OSD-Latency", BAD, "", "not checked, Ceph not reachable"))
             errors.append(f"{fn.__name__}: {e}")
     save_state(state)
 
-    level = max((l for l, _ in issues), default=OK)
-    msg = build_msg(level, issues, summary)
+    level = max((l for _, l, _, _ in issues), default=OK)
+    msg = build_msg(issues)
     down = level == BAD or (level == ATTN and cfg["attn_is_down"])
     params = {"status": "down" if down else "up", "msg": msg}
     rtt = kuma_rtt(cfg["push_url"])
@@ -263,12 +260,12 @@ def main():
     url = cfg["push_url"].split("?")[0] + "?" + urllib.parse.urlencode(params)
 
     if dry:
-        print(f"status: {params['status']}   ping: {params.get('ping')} ms   len: {len(msg)}")
-        print(f"msg:    {msg}")
-        for _, text in sorted(issues, key=lambda x: -x[0]):
-            print(f"issue:  {text}")
+        print(msg)
+        print(f"  -> status {params['status']}, ping {params.get('ping')} ms, {len(msg)} chars")
+        for area, lvl, _, detail in issues:
+            print(f"  {WORD[lvl]:<4}  {area:<11}  {detail}")
         for e in errors:
-            print(f"error:  {e}")
+            print(f"  error: {e}")
         return
     for e in errors:
         print(e, file=sys.stderr)
