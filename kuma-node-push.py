@@ -57,7 +57,7 @@ DEFAULTS = {
     "zfs_scrub_max_days": 35,
     # Disks
     "smart_interval_min": 10,
-    "nvme_wear_pct": [80, 95],      # NVMe percentage_used [Warn, Bad]
+    "nvme_wear_pct": [80, 95],      # wear in % used, NVMe and SATA devstat [Warn, Bad]
     "ata_crc_delta": [1, 50],       # new UDMA CRC errors (cable/backplane)
     # HW
     "ipmi_interval_min": 5,
@@ -383,7 +383,7 @@ def check_disks(ctx):
     for dv in devices:
         path, dtype = dv.get("name", ""), dv.get("type", "auto")
         hint = dtype if path.startswith("/dev/bus") else os.path.basename(path)
-        rc, out, err = run(["smartctl", "-a", "-j", "-n", "standby", "-d", dtype, path], timeout=20)
+        rc, out, err = run(["smartctl", "-a", "-l", "devstat", "-j", "-n", "standby", "-d", dtype, path], timeout=20)
         try:
             d = json.loads(out)
         except ValueError:
@@ -454,6 +454,16 @@ def check_smart(ctx, path, hint, d):
                 if dv:
                     ctx.add("Disks", grade(dv, limits), f"{path}: +{dv} {label} ({v} total)", hint,
                             hold=f"{key}/{aid}")
+
+    # SATA/SAS wear: "Percentage Used Endurance Indicator" from the device statistics log
+    for page in d.get("ata_device_statistics", {}).get("pages", []):
+        for row in page.get("table", []):
+            if "Percentage Used Endurance" in row.get("name", "") and row.get("value") is not None:
+                pu = row["value"]
+                lvl = grade(pu, cfg["nvme_wear_pct"])
+                if lvl:
+                    ctx.add("Disks", lvl, f"{path}: wear {pu}% used", hint)
+                info.append(f"{pu}% worn")
 
     gd = d.get("scsi_grown_defect_list")
     if gd is not None:
