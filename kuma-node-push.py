@@ -128,6 +128,11 @@ SEL_BAD = re.compile(r"memory|ecc|uncorrect|power supply|\bps\d|psu|ac lost|fail
                      r"redundancy lost|bus (?:fatal|uncorrectable)|pci", re.I)
 SEL_SKIP = re.compile(r"log area reset|cleared", re.I)
 
+# SATA wear attributes whose normalized value means "life left in %" (100 = new).
+# Vendors and the devstat log often disagree, so the most pessimistic one is used.
+WEAR_ATTRS = {"Wear_Leveling_Count", "SSD_Life_Left", "Media_Wearout_Indicator",
+              "Percent_Lifetime_Remain", "Remaining_Lifetime_Perc", "Percent_Life_Remaining"}
+
 
 # ---------------------------------------------------------------- helpers
 
@@ -489,16 +494,25 @@ def check_smart(ctx, path, hint, d):
                     ctx.add("Disks", grade(dv, limits), f"{path}: +{dv} {label} ({v} total)", hint,
                             hold=f"{key}/{aid}")
 
-    # SATA/SAS wear: "Percentage Used Endurance Indicator" from the device statistics log
+    # SATA wear: the devstat "Percentage Used Endurance Indicator" plus the vendor
+    # attributes in WEAR_ATTRS. They often disagree, so use the most pessimistic one.
+    sources = []
     for page in d.get("ata_device_statistics", {}).get("pages", []):
         for row in page.get("table", []):
             if "Percentage Used Endurance" in row.get("name", "") and row.get("value") is not None:
-                pu = row["value"]
-                lvl = grade(pu, cfg["nvme_wear_pct"])
-                if lvl:
-                    ctx.add("Disks", lvl, f"{path}: wear {pu}% used", hint)
-                info.append(f"{pu}% worn")
-                info.append(wear_projection(ctx, ident, path, hint, pu))
+                sources.append((row["value"], "devstat"))
+    for a in d.get("ata_smart_attributes", {}).get("table", []):
+        norm = a.get("value")
+        if a.get("name") in WEAR_ATTRS and isinstance(norm, int) and 0 <= norm <= 100:
+            sources.append((100 - norm, f"attr {a.get('id')} {a.get('name')}"))
+    if sources:
+        pu, src = max(sources)
+        lvl = grade(pu, cfg["nvme_wear_pct"])
+        if lvl:
+            ctx.add("Disks", lvl, f"{path}: wear {pu}% used ({src})", hint)
+        others = ", ".join(f"{s} {v}%" for v, s in sources if s != src)
+        info.append(f"{pu}% worn ({src}" + (f"; {others})" if others else ")"))
+        info.append(wear_projection(ctx, ident, path, hint, pu, src))
 
     gd = d.get("scsi_grown_defect_list")
     if gd is not None:
@@ -563,14 +577,14 @@ def check_smartd(ctx):
         ctx.add("Disks", OK, "smartd running, self-tests scheduled")
 
 
-def wear_projection(ctx, ident, path, hint, pu):
+def wear_projection(ctx, ident, path, hint, pu, src=""):
     """Project days until 100% wear from the observed increase. Returns a short info text."""
     w = ctx.state.setdefault("wear", {})
     for k in [k for k, v in w.items() if ctx.now - v.get("seen", v["ts"]) > 30 * 86400]:
         del w[k]                                      # drives gone for 30 days
     e = w.get(ident)
-    if not e or pu < e["pu"]:
-        w[ident] = e = {"ts": ctx.now, "pu": pu}
+    if not e or pu < e["pu"] or e.get("src", "") != src:     # new drive or other wear source
+        w[ident] = e = {"ts": ctx.now, "pu": pu, "src": src}
     e["seen"] = ctx.now
     if e["ts"] == ctx.now:
         return "wear trend pending"
